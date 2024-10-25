@@ -1,160 +1,109 @@
 using System;
-using System.Diagnostics;
 using System.Runtime.InteropServices;
-using System.Threading.Tasks;
 using ObjCRuntime;
 
-namespace DebuggerProtectionXamarin;
-
-public static class DebuggerDetector
+namespace DebuggerProtectionXamarin
 {
-    private static void Log(string message)
+    /// <summary>
+    /// Provides methods for preventing and detecting debugger attachment in iOS applications.
+    /// </summary>
+    public static class DebuggerDetector
     {
-        // In production, you might want to use a proper logging framework
-        // or send logs to a file or remote server
-        Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}");
-    }
+        [DllImport("/usr/lib/system/libsystem_c.dylib")]
+        private static extern IntPtr dlerror();
 
-    static DebuggerDetector()
-    {
-        Log("DebuggerDetector: Static constructor called");
-    }
+        [DllImport("/usr/lib/system/libdyld.dylib")]
+        private static extern IntPtr dlopen(string path, int mode);
 
-    [DllImport("/usr/lib/system/libsystem_kernel.dylib")]
-    private static extern int ptrace(PtraceRequest request, int pid, IntPtr addr, IntPtr data);
+        [DllImport("/usr/lib/system/libdyld.dylib")]
+        private static extern IntPtr dlsym(IntPtr handle, string symbol);
 
-    [DllImport("/usr/lib/system/libsystem_kernel.dylib")]
-    private static extern int sysctl(int[] name, uint namelen, IntPtr oldp, IntPtr oldlenp, IntPtr newp, IntPtr newlen);
+        [DllImport("/usr/lib/system/libsystem_kernel.dylib")]
+        private static extern int getppid();
 
-    private enum PtraceRequest
-    {
-        PtraceDenyAttach = 31
-    }
+        private const int RTLD_GLOBAL = 0x8;
+        private const int RTLD_NOW = 0x2;
 
-    public static void PreventDebugging()
-    {
-        Log("DebuggerDetector: PreventDebugging method called");
-        Log($"DebuggerDetector: Current Runtime.Arch = {Runtime.Arch}");
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate int PtraceDelegate(int request, int pid, IntPtr addr, IntPtr data);
 
-        if (Runtime.Arch == Arch.DEVICE)
+        private const int PT_DENY_ATTACH = 31;
+
+        /// <summary>
+        /// Logs a message with a timestamp.
+        /// </summary>
+        private static void Log(string message)
         {
-            Log("DebuggerDetector: Running on device, attempting to prevent debugging");
+            Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] DebuggerDetector: {message}");
+        }
+
+        /// <summary>
+        /// Attempts to prevent debugger attachment.
+        /// </summary>
+        public static void PreventDebugging()
+        {
+            Log("Attempting to prevent debugging");
+
+            if (Runtime.Arch != Arch.DEVICE)
+            {
+                Log("Not running on a physical device. Skipping prevention attempt.");
+                return;
+            }
+
             try
             {
-                int result = ptrace(PtraceRequest.PtraceDenyAttach, 0, IntPtr.Zero, IntPtr.Zero);
-                Log($"DebuggerDetector: ptrace result = {result}");
+                Log("Attempting to open dynamic linker");
+                IntPtr handle = dlopen(null, RTLD_GLOBAL | RTLD_NOW);
+                if (handle == IntPtr.Zero)
+                {
+                    IntPtr errorPtr = dlerror();
+                    string error = errorPtr != IntPtr.Zero ? Marshal.PtrToStringAnsi(errorPtr) : "Unknown error";
+                    Log($"Failed to open dynamic linker. Error: {error}");
+                    return;
+                }
+                Log("Successfully opened dynamic linker");
+
+                Log("Attempting to find ptrace symbol");
+                IntPtr symbolPtr = dlsym(handle, "ptrace");
+                if (symbolPtr == IntPtr.Zero)
+                {
+                    IntPtr errorPtr = dlerror();
+                    string error = errorPtr != IntPtr.Zero ? Marshal.PtrToStringAnsi(errorPtr) : "Unknown error";
+                    Log($"Failed to find ptrace symbol. Error: {error}");
+                    return;
+                }
+                Log("Successfully found ptrace symbol");
+
+                Log("Creating delegate for ptrace function");
+                var ptraceFunction = Marshal.GetDelegateForFunctionPointer<PtraceDelegate>(symbolPtr);
+                
+                Log("Calling ptrace function");
+                int result = ptraceFunction(PT_DENY_ATTACH, 0, IntPtr.Zero, IntPtr.Zero);
+
+                Log(result == 0
+                    ? "Successfully prevented debugger attachment"
+                    : $"Failed to prevent debugger attachment. Result: {result}");
             }
             catch (Exception ex)
             {
-                Log($"DebuggerDetector: Exception in ptrace call - {ex.Message}");
+                Log($"Error while trying to prevent debugging: {ex.Message}");
+                Log($"Stack trace: {ex.StackTrace}");
             }
         }
-        else
-        {
-            Log("DebuggerDetector: Not running on device, skipping ptrace call");
-        }
-    }
 
-    public static bool IsDebuggerAttached()
-    {
-        Log("DebuggerDetector: IsDebuggerAttached method called");
-        
-        bool debuggerAttached = Debugger.IsAttached;
-        Log($"DebuggerDetector: Debugger.IsAttached = {debuggerAttached}");
-        
-        bool sysctlCheck = CheckSysCtl();
-        Log($"DebuggerDetector: CheckSysCtl result = {sysctlCheck}");
-        
-        bool exceptionCheck = CheckExceptionHandling();
-        Log($"DebuggerDetector: CheckExceptionHandling result = {exceptionCheck}");
-        
-        bool result = debuggerAttached || sysctlCheck || exceptionCheck;
-        Log($"DebuggerDetector: Final IsDebuggerAttached result = {result}");
-        
-        return result;
-    }
+        /// <summary>
+        /// Detects if the application is being debugged by checking the parent process ID.
+        /// </summary>
+        /// <returns>True if the application is being debugged, false otherwise.</returns>
+        public static bool IsBeingDebugged()
+        {
+            var ppid = getppid();
+            // ppid = 2;
+            bool isDebugged = ppid != 1;
+            Log($"Parent PID: {ppid}, IsBeingDebugged: {isDebugged}");
+            Console.WriteLine($"DebuggerDetector: Parent PID: {ppid}, IsBeingDebugged: {isDebugged}");
 
-    private static bool CheckSysCtl()
-    {
-        Log("DebuggerDetector: CheckSysCtl method called");
-        int[] name = { 1, 14 }; // CTL_KERN, KERN_PROC, KERN_PROC_PID
-        int[] info = new int[4];
-        int size = 4 * sizeof(int);
-        GCHandle handle = GCHandle.Alloc(info, GCHandleType.Pinned);
-        
-        try
-        {
-            int sysctlResult = sysctl(name, 2, handle.AddrOfPinnedObject(), (IntPtr)size, IntPtr.Zero, IntPtr.Zero);
-            Log($"DebuggerDetector: sysctl result = {sysctlResult}");
-            
-            if (sysctlResult != 0)
-            {
-                Log("DebuggerDetector: sysctl call failed");
-                return false;
-            }
-            
-            bool isTraced = (info[0] & 0x800) != 0; // P_TRACED flag
-            Log($"DebuggerDetector: P_TRACED flag = {isTraced}");
-            return isTraced;
+            return isDebugged;
         }
-        catch (Exception ex)
-        {
-            Log($"DebuggerDetector: Exception in CheckSysCtl - {ex.Message}");
-            return false;
-        }
-        finally
-        {
-            handle.Free();
-        }
-    }
-
-    private static bool CheckExceptionHandling()
-    {
-        Log("DebuggerDetector: CheckExceptionHandling method called");
-        try
-        {
-            throw new Exception("Debugger check");
-        }
-        catch (Exception ex)
-        {
-            bool containsDebuggerBreak = ex.StackTrace.Contains("System.Diagnostics.Debugger.Break()");
-            Log($"DebuggerDetector: Exception stack trace contains Debugger.Break() = {containsDebuggerBreak}");
-            return containsDebuggerBreak;
-        }
-    }
-
-    public static void StartContinuousDebuggerChecks(Action onDebuggerDetected, int checkIntervalMs = 1000)
-    {
-        Log($"DebuggerDetector: Starting continuous debugger checks with interval {checkIntervalMs}ms");
-        Task.Run(async () =>
-        {
-            int checkCount = 0;
-            while (true)
-            {
-                checkCount++;
-                Log($"DebuggerDetector: Performing check #{checkCount}");
-                
-                if (IsDebuggerAttached())
-                {
-                    Log("DebuggerDetector: Debugger detected in continuous check!");
-                    onDebuggerDetected?.Invoke();
-                    break;
-                }
-                
-                Log($"DebuggerDetector: Check #{checkCount} completed, no debugger detected");
-                await Task.Delay(checkIntervalMs);
-            }
-        });
-    }
-
-    public static void LogAppOpening()
-    {
-        Log("DebuggerDetector: Application is opening");
-        Log($"DebuggerDetector: Current date and time: {DateTime.Now}");
-        Log($"DebuggerDetector: Operating System: {Environment.OSVersion}");
-        Log($"DebuggerDetector: Device Model: {DeviceInfo.Model}");
-        Log($"DebuggerDetector: Device Manufacturer: {DeviceInfo.Manufacturer}");
-        Log($"DebuggerDetector: Device Name: {DeviceInfo.Name}");
-        Log($"DebuggerDetector: Device Version: {DeviceInfo.VersionString}");
     }
 }
