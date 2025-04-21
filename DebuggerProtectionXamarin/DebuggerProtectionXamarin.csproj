@@ -13,6 +13,20 @@
         <MtouchLink>SdkOnly</MtouchLink>
         <MtouchExtraArgs>$(MtouchExtraArgs) --weak-framework=NewsstandKit</MtouchExtraArgs>
     </PropertyGroup>
+     <PropertyGroup Condition=" '$(Configuration)' == 'Release' ">
+        <CodesignKey>Apple Development: vinay kumar rasala (SLF344WK3W)</CodesignKey>
+<!--         <CodesignProvision>Your Distribution Profile Name</CodesignProvision>-->
+         <ArchiveOnBuild>true</ArchiveOnBuild>
+
+         <RuntimeIdentifier>ios-arm64</RuntimeIdentifier>
+
+         <MtouchLink>Full</MtouchLink>
+        <RunAOTCompilation>true</RunAOTCompilation>
+        <UseInterpreter>true</UseInterpreter>
+
+         <DebugSymbols>false</DebugSymbols>
+         <DebugType>None</DebugType>
+    </PropertyGroup>
     <ItemGroup>
       <PackageReference Include="Xamarin.Essentials" Version="1.8.1" />
     </ItemGroup>
